@@ -13,6 +13,12 @@
 *   (3) ONLY SUPPORTS QOS = 0 BECAUSE OF POINT (2). THE FUNCTIONALITY PROVIDED
 *       IS FIRE AND FORGET
 *
+*   (4) FREE ONLINE MQTT BROKER
+*       DIOTY
+*       http://www.dioty.co/mydioty
+*       LOGIN WITH MY GOOGLE ACCOUNT
+*       MQTT BROKER USERNAME/PASSWORD : IN EMAIL
+*
 * REFERENCES
 * -----------
 *   (1) HIVEMQ MQTT REFERENCE
@@ -35,7 +41,6 @@
 static uint8_t s_esp8266_mqtt_client_debug;
 
 //OPERATION RELATED
-static uint8_t s_retry_count = 0;
 static uint16_t s_buffer_size;
 static uint16_t s_mqtt_message_id = 0;
 static esp8266_mqtt_client_packet_type_t s_current_packet_type;
@@ -200,6 +205,8 @@ void ICACHE_FLASH_ATTR ESP8266_MQTT_CLIENT_TcpDisonnect(void)
 void ICACHE_FLASH_ATTR ESP8266_MQTT_CLIENT_Send_Connect(void)
 {
     //SEND MQTT CONNECT PACKET
+    //CLEAN_SESSION = TRUE
+    //QOS ENABLED (SINCE WE WANT CONNACK BEFORE SENDING PUBLISH)
 
     s_current_packet_type = ESP8266_MQTT_CONTROL_PACKET_TYPE_CONNECT;
 
@@ -317,7 +324,7 @@ void ICACHE_FLASH_ATTR ESP8266_MQTT_CLIENT_Send_Connect(void)
     s_esp8266_mqtt_send_packet(p);
     if(s_esp8266_mqtt_client_debug)
     {
-        os_printf("ESP8266 MQTT_CLIENT : CONNECT packet sent\n. Try # %u\n", s_retry_count);
+        os_printf("ESP8266 MQTT_CLIENT : CONNECT packet sent\n");
     }
 
     //FREE BUFFER
@@ -333,6 +340,13 @@ void ICACHE_FLASH_ATTR ESP8266_MQTT_CLIENT_Send_Publish(char* topic,
                                                         esp8266_mqtt_qos_t qos_level)
 {
     //SEND MQTT PUBLISH PACKET
+
+    //ONLY QOS = 0 or 1 SUPPORTED
+    if(qos_level != ESP8266_MQTT_QOS_0 && qos_level != ESP8266_MQTT_QOS_1)
+    {
+        os_printf("ESP8266 MQTT_CLIENT : PUBLISH Fail. Only Qos 0 or 1 supported\n");
+        return;
+    }
 
     s_current_packet_type = ESP8266_MQTT_CONTROL_PACKET_TYPE_PUBLISH;
 
@@ -391,7 +405,7 @@ void ICACHE_FLASH_ATTR ESP8266_MQTT_CLIENT_Send_Publish(char* topic,
     s_esp8266_mqtt_send_packet(p);
     if(s_esp8266_mqtt_client_debug)
     {
-        os_printf("ESP8266 MQTT_CLIENT : PUBLISH packet sent. Try # %u\n", s_retry_count);
+        os_printf("ESP8266 MQTT_CLIENT : PUBLISH packet sent\n");
     }
 
     //FREE BUFFER
@@ -400,6 +414,20 @@ void ICACHE_FLASH_ATTR ESP8266_MQTT_CLIENT_Send_Publish(char* topic,
 
     //INCREMENT MESSAGE ID
     s_mqtt_message_id++;
+
+    //QOS = 0
+    //NO PUBACK WILL BE RECEIVED
+    //CALL THE TCP DATA RECEIVE CB FUNCTION RIGHT AWAY WITH NULL DATA
+    //SET RETRY COUNT TO ESP8266_MQTT_RETRY_COUNT SO NO MORE TRIES ARE ATTEMPTED
+
+    if(qos_level == ESP8266_MQTT_QOS_0)
+    {
+        if(s_esp8266_mqtt_client_debug)
+        {
+            os_printf("ESP8266 MQTT_CLIENT : PUBLISH done as Qos = 0. No PUBACK expected\n");
+        }
+        s_esp8266_mqtt_client_receive_cb(NULL, 0);
+    }
 }
 
 void ICACHE_FLASH_ATTR ESP8266_MQTT_CLIENT_Send_Pingreq(void)
@@ -611,9 +639,13 @@ esp8266_mqtt_client_packet_type_t ICACHE_FLASH_ATTR s_esp8266_mqtt_parse_respons
     }
 
     //BYTE 3, BYTE 4 : VARIABLE HEADER
-    if(s_esp8266_mqtt_client_debug)
+    //ONLY IF CONNACK PACKET TYPE
+    if(((packet[0] & 0xF0) >> 4) == ESP8266_MQTT_CONTROL_PACKET_TYPE_CONNACK)
     {
-        os_printf("ESP8266 MQTT_CLIENT : packet return code 0x%02X %s!\n", packet[3], s_packet_return_code[packet[3]]);
+        if(s_esp8266_mqtt_client_debug)
+        {
+            os_printf("ESP8266 MQTT_CLIENT : packet return code 0x%02X %s!\n", packet[3], s_packet_return_code[packet[3]]);
+        }
     }
 
     //RETURN PACKET TYPE
@@ -672,42 +704,18 @@ static void ICACHE_FLASH_ATTR s_esp8266_mqtt_client_receive_cb(char* pusrdata, u
 
     if(!pusrdata)
     {
-        if(s_retry_count == ESP8266_MQTT_RETRY_COUNT)
+        if(s_esp8266_mqtt_client_debug && s_current_packet_type != ESP8266_MQTT_CONTROL_PACKET_TYPE_PUBLISH)
         {
-            //ALL TRIES EXPIRED
-            s_retry_count = 0;
-            if(s_esp8266_mqtt_client_debug)
-            {
-                os_printf("ESP8266 MQTT_CLIENT : reply timeout!\n");
-            }
-            //CALL USER CB IF NOT NULL
-            if(s_esp8266_mqtt_client_data_recv_cb != NULL)
-            {
-                (*s_esp8266_mqtt_client_data_recv_cb)(ESP8266_MQTT_CONTROL_PACKET_TYPE_INVALID, NULL, 0);
-            }
+            os_printf("ESP8266 MQTT_CLIENT : reply timeout!\n");
         }
-        else
+        //CALL USER CB IF NOT NULL
+        if(s_esp8266_mqtt_client_data_recv_cb != NULL)
         {
-            //SEND MQTT MESSAGE AGAIN
-            s_retry_count++;
-            switch(s_current_packet_type)
-            {
-                case ESP8266_MQTT_CONTROL_PACKET_TYPE_CONNECT:
-                    ESP8266_MQTT_CLIENT_Send_Connect();
-                    break;
-                
-                case ESP8266_MQTT_CONTROL_PACKET_TYPE_PUBLISH:
-                    ESP8266_MQTT_CLIENT_Send_Publish(s_last_topic, s_last_message, s_last_qos);
-                    break;
-                
-                default:
-                    break;
-            }
+            (*s_esp8266_mqtt_client_data_recv_cb)(ESP8266_MQTT_CONTROL_PACKET_TYPE_INVALID, NULL, 0);
         }
     }
     else
     {
-        s_retry_count = 0;
         if(s_esp8266_mqtt_client_debug)
         {
             os_printf("ESP8266 MQTT_CLIENT : Data received!\n");
